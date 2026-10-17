@@ -1,0 +1,44 @@
+/*
+  * UAE - The Un*x Amiga Emulator
+  *
+  * Definitions for accessing cycle counters on a given machine, if possible.
+  *
+  * Copyright 1998 Bernd Schmidt
+  */
+
+#ifndef _RPT_H_
+#define _RPT_H_
+
+#if defined(__PSP2__)
+#include <psp2/kernel/processmgr.h>
+#endif
+
+#if defined(__PS3__)
+#include "ps3_compat.h"
+#endif
+
+typedef unsigned long frame_time_t;
+
+extern int64_t g_uae_epoch;
+
+static __inline__ frame_time_t read_processor_time (void)
+{
+  int64_t time;
+#if defined(__PSP2__)
+  time = sceKernelGetProcessTimeWide();
+#elif defined(__PS3__)
+  struct timeval tv;
+  gettimeofday (&tv, NULL);
+  time = (((int64_t) tv.tv_sec) * 1000000) + tv.tv_usec;
+#else
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+
+  time = (((int64_t) ts.tv_sec) * 1000000) + (ts.tv_nsec / 1000);
+#endif
+  return time - g_uae_epoch;
+}
+
+#endif
+
