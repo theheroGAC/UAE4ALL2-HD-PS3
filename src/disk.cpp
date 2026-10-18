@@ -40,8 +40,10 @@
 #include "menu.h"
 #include "menu_config.h"
 
-#ifdef __PSP2__
+#if defined(__PSP2__)
 #include "psp2/ipf_disk.h"
+#elif defined(__PS3__)
+#include "ps3/ipf_disk.h"
 #endif
 
 
@@ -98,7 +100,7 @@ typedef enum { ADF_NORMAL, ADF_EXT1, ADF_EXT2 } drive_filetype;
 typedef struct {
     drive_type type;
     struct zfile *diskfile;
-#ifdef __PSP2__
+#if defined(__PSP2__) || defined(__PS3__)
     VitaIpfImage *ipf_image;
 #endif
     drive_filetype filetype;
@@ -213,7 +215,7 @@ static void drive_fill_bigbuf (drive *drv);
 static void drive_image_free (drive *drv)
 {
     drv->filetype = (drive_filetype)-1;
-#ifdef __PSP2__
+#if defined(__PSP2__) || defined(__PS3__)
     if (drv->ipf_image) {
         vita_ipf_close(drv->ipf_image);
         drv->ipf_image = NULL;
@@ -296,7 +298,7 @@ static int drive_insert (drive *drv, int dnum, const char *fname)
     int size;
 
     drive_image_free (drv);
-#ifdef __PSP2__
+#if defined(__PSP2__) || defined(__PS3__)
     const char *extension = fname ? strrchr(fname, '.') : NULL;
     int is_ipf = extension && strcasecmp(extension, ".ipf") == 0;
     if (is_ipf) {
@@ -422,7 +424,7 @@ static int drive_insert (drive *drv, int dnum, const char *fname)
 
 static int drive_empty (drive * drv)
 {
-#ifdef __PSP2__
+#if defined(__PSP2__) || defined(__PS3__)
     return drv->diskfile == 0 && drv->ipf_image == NULL;
 #else
     return drv->diskfile == 0;
@@ -674,7 +676,7 @@ static void drive_fill_bigbuf (drive * drv)
         static int ffill_log_count = 0;
         if (ffill_log_count < 24) {
             ffill_log_count++;
-#ifdef __PSP2__
+#if defined(__PSP2__) || defined(__PS3__)
             write_log ("[PS3] drive_fill_bigbuf: cyl=%d side=%d tr=%d ipf=%d num_tracks=%d\n",
                        drv->cyl, side, tr, drv->ipf_image != NULL, drv->num_tracks);
 #else
@@ -684,7 +686,7 @@ static void drive_fill_bigbuf (drive * drv)
         }
     }
 
-#ifdef __PSP2__
+#if defined(__PSP2__) || defined(__PS3__)
     if (drv->ipf_image) {
         if (drv->buffered_cyl == drv->cyl && drv->buffered_side == side)
             return;

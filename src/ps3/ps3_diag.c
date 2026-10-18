@@ -21,6 +21,8 @@
 
 static volatile unsigned int s_frames;
 static volatile const char *s_checkpoint = "boot";
+static volatile const char *s_audio_checkpoint = "idle";
+static volatile const char *s_net_checkpoint = "idle";
 static const char *s_phase = "boot";
 
 static unsigned int s_audio_cb;
@@ -76,11 +78,13 @@ static void *ps3_diag_watchdog(void *arg)
 		frames = s_frames;
 		if (frames == last_frames) {
 			stuck_s += PS3_DIAG_PERIOD_S;
-			s_stalls++;			if (s_ctrl) {		ps3_write_log("[PS3] STALL %us: frames=%u game=%s m68k_pc=%08x checkpoint=%s phase=%s flips=%u flip_timeouts=%u fifo_blocked=%u present_max=%ums audio_cb=%u audio_stalls=%u arena=%uKB used=%uKB rsx_put=%u rsx_get=%u rsx_ref=%u\n",
+			s_stalls++;			if (s_ctrl) {		ps3_write_log("[PS3] STALL %us: frames=%u game=%s m68k_pc=%08x checkpoint=%s audio_cp=%s net_cp=%s phase=%s flips=%u flip_timeouts=%u fifo_blocked=%u present_max=%ums audio_cb=%u audio_stalls=%u arena=%uKB used=%uKB rsx_put=%u rsx_get=%u rsx_ref=%u\n",
 			              stuck_s, frames,
 			              ps3_diag_game_name() ? ps3_diag_game_name() : "-",
 			              (unsigned int)m68k_get_pc(),
 			              s_checkpoint ? s_checkpoint : "?",
+			              s_audio_checkpoint ? s_audio_checkpoint : "?",
+			              s_net_checkpoint ? s_net_checkpoint : "?",
 			              s_phase ? s_phase : "?",
 			              s_flip_count, s_flip_timeouts, s_fifo_blocked,
 			              s_present_max_ms,
@@ -90,11 +94,13 @@ static void *ps3_diag_watchdog(void *arg)
 			              (unsigned int)s_ctrl->get,
 			              (unsigned int)s_ctrl->ref);
 		} else {
-			ps3_write_log("[PS3] STALL %us: frames=%u game=%s m68k_pc=%08x checkpoint=%s phase=%s flips=%u flip_timeouts=%u fifo_blocked=%u present_max=%ums audio_cb=%u audio_stalls=%u arena=%uKB used=%uKB\n",
+			ps3_write_log("[PS3] STALL %us: frames=%u game=%s m68k_pc=%08x checkpoint=%s audio_cp=%s net_cp=%s phase=%s flips=%u flip_timeouts=%u fifo_blocked=%u present_max=%ums audio_cb=%u audio_stalls=%u arena=%uKB used=%uKB\n",
 			              stuck_s, frames,
 			              ps3_diag_game_name() ? ps3_diag_game_name() : "-",
 			              (unsigned int)m68k_get_pc(),
 			              s_checkpoint ? s_checkpoint : "?",
+			              s_audio_checkpoint ? s_audio_checkpoint : "?",
+			              s_net_checkpoint ? s_net_checkpoint : "?",
 			              s_phase ? s_phase : "?",
 			              s_flip_count, s_flip_timeouts, s_fifo_blocked,
 			              s_present_max_ms,
@@ -131,9 +137,11 @@ void ps3_diag_tick(void)
 	if (now - s_last_frame_ms < PS3_DIAG_MAX_STALL_MS)
 		return;
 
-	ps3_write_log("[PS3] tick: no frame for %ums (checkpoint=%s phase=%s m68k_pc=%08x game=%s)\n",
+	ps3_write_log("[PS3] tick: no frame for %ums (checkpoint=%s audio_cp=%s net_cp=%s phase=%s m68k_pc=%08x game=%s)\n",
 	              now - s_last_frame_ms,
 	              s_checkpoint ? s_checkpoint : "?",
+	              s_audio_checkpoint ? s_audio_checkpoint : "?",
+	              s_net_checkpoint ? s_net_checkpoint : "?",
 	              s_phase ? s_phase : "?",
 	              (unsigned int)m68k_get_pc(),
 	              ps3_diag_game_name() ? ps3_diag_game_name() : "-");
@@ -153,7 +161,7 @@ void ps3_diag_frame(void)
 
 	if (!s_ctrl) {
 		s_ctrl = gcmGetControlRegister();
-		ps3_write_log("[PS3] diag: RSX control register %s (build v1.00 %s %s)\n",
+		ps3_write_log("[PS3] diag: RSX control register %s (diag-r5, build v1.01 %s %s)\n",
 		              s_ctrl ? "ready" : "unavailable", __DATE__, __TIME__);
 	}
 
@@ -206,6 +214,16 @@ void ps3_diag_present_time(unsigned int ms)
 void ps3_diag_checkpoint(const char *name)
 {
 	s_checkpoint = name ? name : "?";
+}
+
+void ps3_diag_audio_checkpoint(const char *name)
+{
+	s_audio_checkpoint = name ? name : "?";
+}
+
+void ps3_diag_net_checkpoint(const char *name)
+{
+	s_net_checkpoint = name ? name : "?";
 }
 
 void ps3_sdl_render_cp(const char *what)

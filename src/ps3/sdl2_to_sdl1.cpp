@@ -980,10 +980,66 @@ static SDL_Texture *s_osd_tex = NULL;
 static char s_osd_cached_text[128] = {0};
 static int s_osd_cached_w = 0, s_osd_cached_h = 0;
 
+static SDL_Surface *s_osd_box = NULL;
+
 void ps3_osd_show(const char *text, int duration_ms)
 {
-	(void)text;
-	(void)duration_ms;
+	if (!text || !text[0]) {
+		s_osd_text[0] = '\0';
+		return;
+	}
+	snprintf(s_osd_text, sizeof(s_osd_text), "%s", text);
+	s_osd_start_time = SDL_GetTicks();
+	s_osd_duration = (Uint32)(duration_ms > 0 ? duration_ms : 1500);
+}
+
+static void ps3_draw_osd_surface(SDL_Surface *surface)
+{
+	if (!surface)
+		return;
+	if (s_osd_text[0] == '\0')
+		return;
+	if (SDL_GetTicks() - s_osd_start_time >= s_osd_duration) {
+		s_osd_text[0] = '\0';
+		return;
+	}
+	if (!s_osd_font) {
+		TTF_Init();
+		const char *osd_font_paths[4] = {
+			"./data/font.ttf", "./font.ttf",
+			"/dev_hdd0/uae4all/data/font.ttf",
+			"/dev_hdd0/game/UAEH00001/USRDIR/data/font.ttf"
+		};
+		for (int i = 0; i < 4 && !s_osd_font; i++)
+			s_osd_font = TTF_OpenFont(osd_font_paths[i], 26);
+	}
+	if (!s_osd_font)
+		return;
+	if (strcmp(s_osd_text, s_osd_cached_text) != 0) {
+		SDL_Color osd_col = { 255, 255, 255, 255 };
+		SDL_Color osd_bg = { 16, 16, 16, 255 };
+		SDL_Surface *osd_new = TTF_RenderUTF8_Shaded(s_osd_font, s_osd_text, osd_col, osd_bg);
+		if (!osd_new)
+			return;
+		SDL_Surface *osd_conv = SDL_ConvertSurface(osd_new, surface->format, 0);
+		SDL_FreeSurface(osd_new);
+		if (!osd_conv)
+			return;
+		if (s_osd_box)
+			SDL_FreeSurface(s_osd_box);
+		s_osd_box = osd_conv;
+		s_osd_cached_w = s_osd_box->w;
+		s_osd_cached_h = s_osd_box->h;
+		snprintf(s_osd_cached_text, sizeof(s_osd_cached_text), "%s", s_osd_text);
+	}
+	if (!s_osd_box)
+		return;
+	int osd_x = (surface->w - s_osd_cached_w) / 2;
+	int osd_y = surface->h - s_osd_cached_h - 4;
+	if (osd_x < 2) osd_x = 2;
+	if (osd_y < 2) osd_y = 2;
+	SDL_Rect osd_rect = { osd_x, osd_y, s_osd_cached_w, s_osd_cached_h };
+	SDL_BlitSurface(s_osd_box, NULL, surface, &osd_rect);
 }
 
 static void ps3_render_osd_overlays(SDL_Renderer *rend, int sw, int sh)
@@ -1155,6 +1211,9 @@ void SDL_Flip(SDL_Surface *surface) {
 		}
 
 		SDL_Rect dst_rect = { x_offset + eff_off_x, y_offset + eff_off_y, scaled_width, scaled_height };
+
+		if (!displaying_menu)
+			ps3_draw_osd_surface(surface);
 
 		if (displaying_menu) {
 			static SDL_Texture *s_menu_tex = NULL;

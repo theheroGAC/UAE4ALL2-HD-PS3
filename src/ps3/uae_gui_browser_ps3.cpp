@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 
 #include <SDL.h>
 #include <SDL_image.h>
@@ -39,6 +40,7 @@ typedef struct {
     char name[256];
     bool is_dir;
     size_t size;
+    int usb_dev;
 } FileEntry;
 
 static FileEntry s_entries[MAX_ENTRIES];
@@ -150,10 +152,36 @@ static void scan_directory(const char *path)
         strncpy(s_entries[0].name, "..", sizeof(s_entries[0].name));
         s_entries[0].is_dir = true;
         s_entries[0].size = 0;
+        s_entries[0].usb_dev = 0;
         s_num_entries = 1;
+    }
+    if (strcmp(path, "./roms") == 0 || strcmp(path, ".") == 0 ||
+        strcmp(path, "/dev_hdd0/uae4all/roms") == 0) {
+        DIR *usbdfd = opendir("/");
+        if (usbdfd) {
+            struct dirent *devent;
+            while ((devent = readdir(usbdfd)) != NULL && s_num_entries < MAX_ENTRIES - 1) {
+                if (strncmp(devent->d_name, "dev_usb", 7) != 0)
+                    continue;
+                unsigned int u = 0;
+                if (sscanf(devent->d_name, "dev_usb%u", &u) != 1 || u > 99)
+                    continue;
+                char usb_label[48];
+                snprintf(usb_label, sizeof(usb_label), "USB %u", u + 1);
+                strncpy(s_entries[s_num_entries].name, usb_label, sizeof(s_entries[s_num_entries].name) - 1);
+                s_entries[s_num_entries].name[sizeof(s_entries[s_num_entries].name) - 1] = '\0';
+                s_entries[s_num_entries].is_dir = true;
+                s_entries[s_num_entries].size = 0;
+                s_entries[s_num_entries].usb_dev = (int)(u + 1);
+                s_num_entries++;
+            }
+            closedir(usbdfd);
+        }
     }
 
     DIR *dfd = opendir(path);
+    if (!dfd)
+        write_log("[PS3] browser: opendir %s failed (errno=%d)\n", path, errno);
     if (dfd) {
         struct dirent *dir;
         while ((dir = readdir(dfd)) != NULL && s_num_entries < MAX_ENTRIES) {
@@ -176,6 +204,7 @@ static void scan_directory(const char *path)
                 s_entries[s_num_entries].name[sizeof(s_entries[s_num_entries].name) - 1] = '\0';
                 s_entries[s_num_entries].is_dir = is_dir;
                 s_entries[s_num_entries].size = fsz;
+                s_entries[s_num_entries].usb_dev = 0;
                 s_num_entries++;
             }
         }
@@ -398,7 +427,11 @@ int ps3_gui_run_browser(char *out_path, const char *start_dir, int disk_drive_id
                         }
                     } else {
                         char new_dir[MAX_PATH_LEN];
-                        snprintf(new_dir, sizeof(new_dir), "%s/%s", s_current_dir, ent->name);
+                        if (ent->usb_dev) {
+                            snprintf(new_dir, sizeof(new_dir), "/dev_usb%03d", ent->usb_dev - 1);
+                            write_log("[PS3] browser: enter %s\n", new_dir);
+                        } else
+                            snprintf(new_dir, sizeof(new_dir), "%s/%s", s_current_dir, ent->name);
                         strncpy(s_current_dir, new_dir, sizeof(s_current_dir) - 1);
                     }
                     scan_directory(s_current_dir);

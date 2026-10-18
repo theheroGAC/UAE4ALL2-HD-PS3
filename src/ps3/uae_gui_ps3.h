@@ -109,6 +109,7 @@ void ps3_gui_shutdown(void);
 void ps3_gui_shutdown_final(void);
 void ps3_gui_prepare_exit(void);
 void ps3_gui_update_input(Ps3InputState *input);
+void ps3_gui_flip(void);
 void ps3_gui_update_system_info(Ps3SystemInfo *sysinfo);
 void ps3_gui_save_as_started(void);
 

@@ -15,19 +15,7 @@ struct hostent *gethostbyname(const char *name) {
 }
 
 int getpeername(int s, struct sockaddr *name, socklen_t *namelen) {
-	(void)s;
-	(void)name;
-	(void)namelen;
-	errno = ENOSYS;
-	return -1;
-}
-
-int getsockname(int s, struct sockaddr *name, socklen_t *namelen) {
-	(void)s;
-	(void)name;
-	(void)namelen;
-	errno = ENOSYS;
-	return -1;
+	return sysNetGetPeerName(s, name, namelen);
 }
 
 int getsockopt(int s, int level, int optname, void *optval, socklen_t *optlen) {
@@ -48,6 +36,10 @@ int setsockopt(int s, int level, int optname, const void *optval, socklen_t optl
 	(void)optlen;
 	errno = ENOSYS;
 	return -1;
+}
+
+int getsockname(int s, struct sockaddr *name, socklen_t *namelen) {
+	return sysNetGetSockName(s, name, namelen);
 }
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {

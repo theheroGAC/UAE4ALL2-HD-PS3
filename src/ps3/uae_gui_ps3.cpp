@@ -382,6 +382,12 @@ void ps3_gui_update_system_info(Ps3SystemInfo *sysinfo)
     s_sysinfo_init = true;
 }
 
+void ps3_gui_flip(void)
+{
+    if (prSDLScreen)
+        SDL_Flip(prSDLScreen);
+}
+
 static inline Uint32 to_sdl_color(unsigned int col)
 {
     Uint8 r = (col >> 0) & 0xFF;
@@ -1407,10 +1413,10 @@ void ps3_show_about_box(void)
     ps3_diag_checkpoint("dlg:about");
     static const CreditLine credits[] = {
         { "UAE4ALL2 HD PS3", CR_TITLE },
-        { "Version 1.00 - CD32 / Akiko Edition", CR_SUBTITLE },
+        { "Version 1.01 - CD32 / Akiko Edition", CR_SUBTITLE },
         { "Amiga Emulator for PlayStation 3", CR_DIM },
         { "", CR_EMPTY },
-        { "Version 1.00 by theheroGAC", CR_TEXT },
+        { "Version 1.01 by theheroGAC", CR_TEXT },
         { "A high-definition port of the classic UAE4ALL Amiga emulator,", CR_TEXT },
         { "now with WHDLoad, HDF, IPF and CD32 support on PS3.", CR_TEXT },
         { "Optional Picasso96 / RTG and UAEGFX support", CR_TEXT },

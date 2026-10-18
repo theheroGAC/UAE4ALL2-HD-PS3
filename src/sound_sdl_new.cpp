@@ -138,7 +138,7 @@ static void sound_thread_mixer(void *ud, Uint8 *stream, int len)
 		return;
 	}
 	ps3_diag_audio_cb();
-	ps3_diag_checkpoint("snd:callback");
+	ps3_diag_audio_checkpoint("snd:callback");
 #endif
 
 #ifdef SOUND_USE_SEMAPHORES

@@ -273,6 +273,7 @@ if(BUILD_PS3)
     src/ps3/m3u_manager.cpp
     src/ps3/cover_manager_ps3.cpp
     src/ps3/game_metadata_ps3.cpp
+    src/ps3/ipf_disk.cpp
     src/stb_vorbis.c
   )
   set(SRC_FILES ${PS3_SRC_FILES} ${SRC_FILES})
@@ -368,6 +369,7 @@ if(BUILD_PS3)
     chdr-static
     rsx
     sysutil
+    netctl
     io
     audio
 

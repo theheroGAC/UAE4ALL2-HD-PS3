@@ -31,6 +31,14 @@ void ps3_diag_present_time(unsigned int ms);
 /* Name of the operation currently running; must be a static string. */
 void ps3_diag_checkpoint(const char *name);
 
+/* Checkpoint for the SDL audio thread (kept separate from the main-thread
+ * checkpoint so the audio mixer cannot overwrite where the main thread sits). */
+void ps3_diag_audio_checkpoint(const char *name);
+
+/* Checkpoint for background network threads (FTP server/clients), kept
+ * separate from the main-thread checkpoint for the same reason. */
+void ps3_diag_net_checkpoint(const char *name);
+
 /* Coarse phase shown in heartbeat/stall lines (menu tab, game, splash);
  * must be a static string. Logged when it changes. */
 void ps3_diag_phase(const char *phase);

@@ -2245,6 +2245,13 @@ if(!vkbd_mode)
 		ps3_fast_forward = hold_zr || ps3_turbo_toggle;
 		if (hold_zr) triggerR2[0] = 0;
 
+		static int ps3_ff_prev = 0;
+		if (ps3_fast_forward && !ps3_ff_prev)
+			gui_set_message(">> TURBO >>", 60);
+		else if (!ps3_fast_forward && ps3_ff_prev)
+			gui_set_message("TURBO OFF", 30);
+		ps3_ff_prev = ps3_fast_forward;
+
 		static int just_zl_r = 0;
 		static int just_zl_l = 0;
 		static int just_zl_up = 0;
@@ -2517,10 +2524,12 @@ if(!vkbd_mode)
 
 void gui_set_message(const char *msg, int t)
 {
-	return;
-
+#if defined(__PS3__)
+	ps3_osd_show(msg, t * 17);
+#else
 	show_message=t;
 	strncpy(show_message_str, msg, 36);
+#endif
 }
 
 void gui_show_window_bar(int per, int max, int case_title)

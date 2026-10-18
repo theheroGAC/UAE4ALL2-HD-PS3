@@ -30,6 +30,8 @@
 #include "zfile.h"
 
 #include <SDL_image.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 
 #include "uae_gui_ps3.h"
@@ -99,6 +101,7 @@ static int ps3_shader_cycle(int s, int dir) {
 #include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <net/netctl.h>
 #include "ps3_compat.h"
 
 static char s_ps3_ftp_ip[64] = "127.0.0.1";
@@ -148,20 +151,221 @@ static int ps3_ftp_get_client_count(void) {
     return count;
 }
 
-static void ps3_ftp_refresh_ip(void) {
-    Result rc = nifmInitialize(NifmServiceType_User);
-    if (R_SUCCEEDED(rc)) {
-        u32 ip_val = 0;
-        if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ip_val)) && ip_val != 0) {
-            struct in_addr in;
-            in.s_addr = ip_val;
-            char *ip_str = inet_ntoa(in);
-            if (ip_str && strcmp(ip_str, "0.0.0.0") != 0 && strcmp(ip_str, "127.0.0.1") != 0) {
-                snprintf(s_ps3_ftp_ip, sizeof(s_ps3_ftp_ip), "%s", ip_str);
+static int s_ps3_netctl_logs = 0;
+static int s_ps3_netctl_init_tried = 0;
+static volatile int s_ftp_probe_done = 0;
+static volatile int s_ftp_probe_ok = 0;
+static int s_ftp_probe_attempts = 0;
+static volatile int s_ftp_route_seen = 0;
+static char s_ps3_ftp_manual_ip[40] = "";
+
+static int ps3_ftp_ip_invalid(void) {
+    return strcmp(s_ps3_ftp_ip, "127.0.0.1") == 0 || strcmp(s_ps3_ftp_ip, "0.0.0.0") == 0 ||
+           s_ps3_ftp_ip[0] == '\0';
+}
+
+static int ps3_ftp_udp_probe_ip(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: udp probe socket failed (errno=%d)\n", errno);
+        }
+        return 0;
+    }
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(53);
+    dst.sin_addr.s_addr = 0x08080808u;
+    ps3_diag_net_checkpoint("ftp:ip:udp-connect");
+    int crv = connect(fd, (struct sockaddr*)&dst, sizeof(dst));
+    if (crv != 0) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: udp probe connect rv=%d errno=%d\n", crv, errno);
+        }
+        close(fd);
+        return 0;
+    }
+    s_ftp_route_seen = 1;
+    struct sockaddr_in loc;
+    socklen_t lsz = sizeof(loc);
+    memset(&loc, 0, sizeof(loc));
+    ps3_diag_net_checkpoint("ftp:ip:udp-sockname");
+    int srv = getsockname(fd, (struct sockaddr*)&loc, &lsz);
+    if (srv != 0 || loc.sin_addr.s_addr == 0) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: udp probe sockname rv=%d errno=%d\n", srv, errno);
+        }
+        close(fd);
+        return 0;
+    }
+    unsigned int a = ntohl(loc.sin_addr.s_addr);
+    if (a == 0x7f000001u) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: udp probe ip 127.0.0.1 (ignored)\n");
+        }
+        close(fd);
+        return 0;
+    }
+    snprintf(s_ps3_ftp_ip, sizeof(s_ps3_ftp_ip), "%u.%u.%u.%u",
+             (a >> 24) & 255u, (a >> 16) & 255u, (a >> 8) & 255u, a & 255u);
+    write_log("[PS3] ftp: console IP %s (udp)\n", s_ps3_ftp_ip);
+    ps3_diag_net_checkpoint("ftp:ip:udp-ok");
+    close(fd);
+    return 1;
+}
+
+static int ps3_ftp_refresh_ip(void) {
+    if (!s_ps3_netctl_init_tried) {
+        s_ps3_netctl_init_tried = 1;
+        ps3_diag_net_checkpoint("ftp:ip:init");
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: netctl init call\n");
+        }
+        s32 irc = netCtlInit();
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: netctl init rv=%d (0x%08x)\n", irc, irc);
+        }
+    }
+    ps3_diag_net_checkpoint("ftp:ip:state");
+    if (s_ps3_netctl_logs < 8) {
+        s_ps3_netctl_logs++;
+        write_log("[PS3] ftp: netctl probe\n");
+    }
+    s32 nstate = 0;
+    s32 rv = netCtlGetState(&nstate);
+    if (rv != 0) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: netctl state rv=%d (0x%08x)\n", rv, rv);
+        }
+        return 0;
+    }
+    if (s_ps3_netctl_logs < 8) {
+        s_ps3_netctl_logs++;
+        write_log("[PS3] ftp: netctl state=%d\n", (int)nstate);
+    }
+    if (nstate != NET_CTL_STATE_IPObtained)
+        return 0;
+    ps3_diag_net_checkpoint("ftp:ip:info");
+    union net_ctl_info info;
+    memset(&info, 0, sizeof(info));
+    s32 irv = netCtlGetInfo(NET_CTL_INFO_IP_ADDRESS, &info);
+    if (irv != 0) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: netctl info rv=%d (0x%08x)\n", irv, irv);
+        }
+        return 0;
+    }
+    info.ip_address[NET_CTL_IPV4_ADDR_STR_LEN - 1] = '\0';
+    if (info.ip_address[0] == '\0' ||
+        strcmp(info.ip_address, "0.0.0.0") == 0 ||
+        strcmp(info.ip_address, "127.0.0.1") == 0) {
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: netctl ip %s (ignored)\n", info.ip_address);
+        }
+        return 0;
+    }
+    snprintf(s_ps3_ftp_ip, sizeof(s_ps3_ftp_ip), "%s", info.ip_address);
+    write_log("[PS3] ftp: console IP %s (netctl)\n", s_ps3_ftp_ip);
+    ps3_diag_net_checkpoint("ftp:ip:ok");
+    return 1;
+}
+
+static void* ps3_ftp_probe_child(void *arg) {
+    int udp_first = (int)(long)arg;
+    if (!udp_first) {
+        if (ps3_ftp_refresh_ip()) {
+            s_ftp_probe_ok = 1;
+            s_ftp_probe_done = 1;
+            return NULL;
+        }
+    }
+    if (ps3_ftp_udp_probe_ip()) {
+        s_ftp_probe_ok = 1;
+        s_ftp_probe_done = 1;
+        return NULL;
+    }
+    if (udp_first) {
+        if (ps3_ftp_refresh_ip()) {
+            s_ftp_probe_ok = 1;
+            s_ftp_probe_done = 1;
+            return NULL;
+        }
+    }
+    s_ftp_probe_done = 1;
+    return NULL;
+}
+
+static void* ps3_ftp_probe_worker(void *arg) {
+    (void)arg;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 65536);
+    s_ftp_probe_attempts = 0;
+    while (s_ps3_ftp_running && ps3_ftp_ip_invalid()) {
+        if (s_ftp_probe_attempts >= 5) {
+            if (s_ps3_netctl_logs < 10) {
+                s_ps3_netctl_logs++;
+                write_log("[PS3] ftp: ip probe give up after %d attempts\n", s_ftp_probe_attempts);
+            }
+            break;
+        }
+        s_ftp_probe_attempts++;
+        if (s_ps3_netctl_logs < 8) {
+            s_ps3_netctl_logs++;
+            write_log("[PS3] ftp: ip probe attempt %d (udp_first=%d)\n",
+                      s_ftp_probe_attempts, (s_ftp_probe_attempts & 1) == 0 ? 1 : 0);
+        }
+        int udp_first = (s_ftp_probe_attempts & 1) == 0;
+        s_ftp_probe_done = 0;
+        s_ftp_probe_ok = 0;
+        pthread_t child;
+        if (pthread_create(&child, &attr, ps3_ftp_probe_child, (void*)(long)udp_first) == 0) {
+            pthread_detach(child);
+        } else {
+            if (s_ps3_netctl_logs < 8) {
+                s_ps3_netctl_logs++;
+                write_log("[PS3] ftp: ip probe child create failed (errno=%d)\n", errno);
+            }
+            s_ftp_probe_done = 1;
+        }
+        unsigned int waited = 0;
+        while (s_ps3_ftp_running && !s_ftp_probe_done && waited < 2500u) {
+            SDL_Delay(50);
+            waited += 50;
+        }
+        if (!s_ftp_probe_done) {
+            if (s_ps3_netctl_logs < 8) {
+                s_ps3_netctl_logs++;
+                write_log("[PS3] ftp: ip probe attempt %d timed out\n", s_ftp_probe_attempts);
+            }
+        } else if (s_ftp_probe_ok) {
+            if (s_ps3_netctl_logs < 8) {
+                s_ps3_netctl_logs++;
+                write_log("[PS3] ftp: ip probe attempt %d ok\n", s_ftp_probe_attempts);
+            }
+            break;
+        } else {
+            if (s_ps3_netctl_logs < 8) {
+                s_ps3_netctl_logs++;
+                write_log("[PS3] ftp: ip probe attempt %d failed\n", s_ftp_probe_attempts);
             }
         }
-        nifmExit();
+        if (s_ps3_ftp_running && ps3_ftp_ip_invalid())
+            SDL_Delay(1500);
     }
+    write_log("[PS3] ftp: ip probe worker exit\n");
+    pthread_attr_destroy(&attr);
+    return NULL;
 }
 
 static void ftp_normalize_virtual_path(const char *v_cwd, const char *arg, char *out, size_t out_sz) {
@@ -959,6 +1163,7 @@ static void* ps3_ftp_client_session(void *arg) {
     if (pasv_fd >= 0) close(pasv_fd);
     close(client_fd);
     ps3_ftp_unregister_client(client_fd);
+    write_log("[PS3] ftp: client session end\n");
     return NULL;
 }
 
@@ -966,7 +1171,7 @@ static void* ps3_ftp_thread_func(void *arg) {
     (void)arg;
     while (s_ps3_ftp_running && s_ps3_server_fd >= 0) {
         fd_set readfds;
-        ps3_diag_checkpoint("ftp:wait");
+        ps3_diag_net_checkpoint("ftp:wait");
         FD_ZERO(&readfds);
         FD_SET(s_ps3_server_fd, &readfds);
         struct timeval tv;
@@ -979,10 +1184,17 @@ static void* ps3_ftp_thread_func(void *arg) {
 
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-        ps3_diag_checkpoint("ftp:accept");
+        ps3_diag_net_checkpoint("ftp:accept");
         int client_fd = accept(s_ps3_server_fd, (struct sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) {
             continue;
+        }
+        s_ftp_route_seen = 1;
+        {
+            unsigned int pa = ntohl(client_addr.sin_addr.s_addr);
+            write_log("[PS3] ftp: client connected from %u.%u.%u.%u:%u\n",
+                      (pa >> 24) & 255u, (pa >> 16) & 255u, (pa >> 8) & 255u, pa & 255u,
+                      (unsigned)ntohs(client_addr.sin_port));
         }
 
         FtpClientContext *ctx = (FtpClientContext*)malloc(sizeof(FtpClientContext));
@@ -1002,8 +1214,20 @@ static void* ps3_ftp_thread_func(void *arg) {
     return NULL;
 }
 
+static unsigned int ps3_ftp_ip_to_u32(const char *ip)
+{
+    unsigned int a = 0, b = 0, c = 0, d = 0;
+    if (!ip || sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+        return INADDR_ANY;
+    if (a > 255 || b > 255 || c > 255 || d > 255)
+        return INADDR_ANY;
+    return htonl((a << 24) | (b << 16) | (c << 8) | d);
+}
+
 int ps3_ftp_start(void) {
     if (s_ps3_ftp_running) return 0;
+    write_log("[PS3] ftp: start requested\n");
+    s_ftp_route_seen = 0;
     mkdir("./screenshots", 0777);
     mkdir("./saves", 0777);
     mkdir("./roms", 0777);
@@ -1011,27 +1235,64 @@ int ps3_ftp_start(void) {
     mkdir("./thumbs", 0777);
     mkdir("./kickstarts", 0777);
     mkdir("./tmp", 0777);
-    ps3_ftp_refresh_ip();
+    write_log("[PS3] ftp: open socket\n");
     s_ps3_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_ps3_server_fd < 0) return -1;
+    if (s_ps3_server_fd < 0) {
+        write_log("[PS3] ftp: socket failed (errno=%d)\n", errno);
+        return -1;
+    }
     int opt = 1;
     setsockopt(s_ps3_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(21);
-    if (bind(s_ps3_server_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) != 0) {
-        write_log("[PS3] ftp: bind 21 failed (errno=%d)\n", errno);
+    static const int kFtpPorts[] = { 21, 5000, 2121, 8021 };
+    int bound_port = -1;
+    for (unsigned i = 0; i < sizeof(kFtpPorts) / sizeof(kFtpPorts[0]) && bound_port < 0; i++) {
+        serv_addr.sin_port = htons((unsigned short)kFtpPorts[i]);
+        serv_addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(s_ps3_server_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == 0) {
+            bound_port = kFtpPorts[i];
+            write_log("[PS3] ftp: bind %d ok\n", bound_port);
+            break;
+        }
+        write_log("[PS3] ftp: bind %d failed (errno=%d)\n", kFtpPorts[i], errno);
+        if (strcmp(s_ps3_ftp_ip, "127.0.0.1") == 0 || strcmp(s_ps3_ftp_ip, "0.0.0.0") == 0)
+            continue;
+        serv_addr.sin_addr.s_addr = ps3_ftp_ip_to_u32(s_ps3_ftp_ip);
+        if (bind(s_ps3_server_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == 0) {
+            bound_port = kFtpPorts[i];
+            write_log("[PS3] ftp: bound port %d to local address %s\n", bound_port, s_ps3_ftp_ip);
+        } else {
+            write_log("[PS3] ftp: bind %d on %s failed (errno=%d)\n", kFtpPorts[i], s_ps3_ftp_ip, errno);
+        }
+    }
+    if (bound_port < 0) {
         close(s_ps3_server_fd);
         s_ps3_server_fd = -1;
         return -1;
     }
-    s_ps3_ftp_port = 21;
-    write_log("[PS3] ftp: listening on port 21\n");
+    s_ps3_ftp_port = bound_port;
+    write_log("[PS3] ftp: listening on port %d\n", bound_port);
     listen(s_ps3_server_fd, 4);
     s_ps3_ftp_running = 1;
-    pthread_create(&s_ps3_ftp_thread, NULL, ps3_ftp_thread_func, NULL);
+    write_log("[PS3] ftp: starting server thread\n");
+    if (pthread_create(&s_ps3_ftp_thread, NULL, ps3_ftp_thread_func, NULL) != 0) {
+        write_log("[PS3] ftp: thread create failed (errno=%d)\n", errno);
+        s_ps3_ftp_running = 0;
+        close(s_ps3_server_fd);
+        s_ps3_server_fd = -1;
+        return -1;
+    }
+    pthread_t netctl_tid;
+    if (pthread_create(&netctl_tid, NULL, ps3_ftp_probe_worker, NULL) == 0) {
+        pthread_detach(netctl_tid);
+        write_log("[PS3] ftp: ip probe worker started\n");
+    } else {
+        write_log("[PS3] ftp: ip probe worker create failed (errno=%d)\n", errno);
+    }
+    write_log("[PS3] ftp: server thread running\n");
     ps3_diag_checkpoint("ftp:running");
     return 0;
 }
@@ -1039,7 +1300,12 @@ int ps3_ftp_start(void) {
 void ps3_ftp_stop(void) {
     if (!s_ps3_ftp_running) return;
     ps3_diag_checkpoint("ftp:stop");
+    write_log("[PS3] ftp: stop requested\n");
     s_ps3_ftp_running = 0;
+    s_ftp_route_seen = 0;
+    ps3_diag_checkpoint("ftp:join");
+    int jerr = pthread_join(s_ps3_ftp_thread, NULL);
+    write_log("[PS3] ftp: server thread joined (rc=%d)\n", jerr);
     if (s_ps3_server_fd >= 0) {
         shutdown(s_ps3_server_fd, SHUT_RDWR);
         close(s_ps3_server_fd);
@@ -1049,16 +1315,11 @@ void ps3_ftp_stop(void) {
     for (int i = 0; i < MAX_FTP_CLIENTS; i++) {
         if (s_ps3_client_fds[i] >= 0) {
             shutdown(s_ps3_client_fds[i], SHUT_RDWR);
-            close(s_ps3_client_fds[i]);
-            s_ps3_client_fds[i] = -1;
         }
     }
     pthread_mutex_unlock(&s_ps3_clients_mutex);
-    ps3_diag_checkpoint("ftp:join");
-    pthread_detach(s_ps3_ftp_thread);
-    SDL_Delay(200);
     ps3_diag_checkpoint("ftp:stopped");
-    SDL_Delay(50);
+    SDL_Delay(120);
 }
 
 int ps3_ftp_is_running(void) { return s_ps3_ftp_running; }
@@ -1538,9 +1799,9 @@ static const char *vita_kickstart_aliases[KICKSTART_ROM_COUNT][16] = {
     { "kick13.rom", "kick34005.A500", "kick34005.a500", "Kick34005.a500", "amiga-os-130.rom", "kick1.3.rom", NULL },
     { "kick20.rom", "kick37175.A500", "kick37175.a500", "amiga-os-204.rom", "kick204.rom", "kick2.04.rom", "Kickstart-v2.04", NULL },
     { "kick31.rom", "kick40068.A1200", "kick40068.a1200", "amiga-os-310-a1200.rom", "kick3.1.rom", "kick40068.A4000", "kick40068.a4000", "Kickstart-v3.1", NULL },
-    { "kickcustom.rom", "custom.rom", "kick.rom", NULL },
+    { "kickcustom.rom", "custom.rom", "kick.rom", "kick32.rom", "kick322.rom", "kick47102.A1200", "kick47102.A500", "kick3.2.rom", "kick3.2.2.rom", "diagrom.rom", NULL },
     { "aros-amiga-m68k-rom.bin", "aros.rom", NULL },
-    { "kick40060.CD32", "kick40060.cd32", "amiga-os-310-cd32.rom", "kick31.rom", "Kickstart-v3.1-rev40.60-1993-Commodore-CD32.rom", NULL },
+    { "kick40060.CD32", "kick40060.cd32", "amiga-os-310-cd32.rom", "kick31.rom", "Kickstart-v3.1-rev40.60-1993-Commodore-CD32.rom", "kick40060.CD32.rom", "kick40060.rom", "cd32.rom", "kick31cd32.rom", "CD32 ROM r40.60 (1993)(Commodore)(CD32).rom", "Kickstart v3.1 rev 40.60 (1993)(Commodore)(CD32).rom", NULL },
     { "kick31034.A1000", "amiga-os-110-ntsc.rom", "Kickstart-v1.1", NULL },
     { "kick32034.A1000", "amiga-os-110-pal.rom", NULL },
     { "kick33180.A500", "kick33180.a500", "amiga-os-120.rom", "kick12.rom", "kick1.2.rom", NULL },
@@ -1624,17 +1885,31 @@ int ps3_set_kickstart(int index, int load_rom)
     extfile[0] = '\0';
     if (extended_rom_names[index][0] != '\0') {
         if (!ps3_find_kickstart_file(extended_rom_names[index], extfile, sizeof(extfile))) {
-            if (index == 6) {
-                const char *cd32_ext_aliases[] = {
+            if (index == 5) {
+                static const char *const aros_ext_aliases[] = {
+                    "aros-ext.bin", "aros.rom.ext", NULL
+                };
+                for (int e = 0; aros_ext_aliases[e] && extfile[0] == '\0'; e++)
+                    ps3_find_kickstart_file(aros_ext_aliases[e], extfile, sizeof(extfile));
+            } else if (index == 6) {
+                static const char *const cd32_ext_aliases[] = {
                     "kick40060.CD32.ext", "kick40060.cd32.ext",
                     "amiga-os-310-cd32-ext.rom", "amiga-os-310-cd32.ext",
-                    "cd32.ext", "CD32.ext", "kick31.ext",
-                    "CD32 Extended-ROM", "CD32.ROM.ext", "kick40060.ext", "ext_cd32.rom", NULL
+                    "cd32.ext", "CD32.ext", "kick31.ext", "kick31cd32.ext",
+                    "cd32ext.rom", "cd32_ext.rom", "kick40060.CD32.ext.rom",
+                    "CD32 Extended-ROM", "CD32.ROM.ext", "kick40060.ext", "ext_cd32.rom",
+                    "CD32 Extended-ROM rev 40.60 (1993)(Commodore)(CD32).rom",
+                    "CD32-Extended-ROM-r40.60-1993-Commodore-CD32.rom", NULL
                 };
-                for (int e = 0; cd32_ext_aliases[e]; e++) {
-                    if (ps3_find_kickstart_file(cd32_ext_aliases[e], extfile, sizeof(extfile)))
-                        break;
-                }
+                for (int e = 0; cd32_ext_aliases[e] && extfile[0] == '\0'; e++)
+                    ps3_find_kickstart_file(cd32_ext_aliases[e], extfile, sizeof(extfile));
+            } else if (index == 17) {
+                static const char *const cdtv_ext_aliases[] = {
+                    "amiga-os-130-cdtv-ext.rom", "amiga-os-130-cdtv.rom",
+                    "cdtv.rom", "CDTV Extended-ROM", "kick34005.CDTV.rom", NULL
+                };
+                for (int e = 0; cdtv_ext_aliases[e] && extfile[0] == '\0'; e++)
+                    ps3_find_kickstart_file(cdtv_ext_aliases[e], extfile, sizeof(extfile));
             }
         }
     }
@@ -3646,7 +3921,7 @@ static void lib_scan_directory(const char *dir_path, int depth, int *processed, 
  * (the device root as well as the usual uae4all/roms subfolders, because users
  * copy their ADFs to whatever folder they like on the stick).  Duplicates are
  * filtered out. */
-#define LIB_MAX_SCAN_ROOTS 16
+#define LIB_MAX_SCAN_ROOTS 24
 
 static int lib_add_scan_root(const char **roots, int count, const char *dir)
 {
@@ -3673,6 +3948,12 @@ static int lib_build_scan_roots(const char **roots)
     n = lib_add_scan_root(roots, n, "/dev_usb001/uae4all/roms");
     n = lib_add_scan_root(roots, n, "/dev_usb001/roms");
     n = lib_add_scan_root(roots, n, "/dev_usb001");
+    n = lib_add_scan_root(roots, n, "/dev_usb002/uae4all/roms");
+    n = lib_add_scan_root(roots, n, "/dev_usb002/roms");
+    n = lib_add_scan_root(roots, n, "/dev_usb002");
+    n = lib_add_scan_root(roots, n, "/dev_usb003/uae4all/roms");
+    n = lib_add_scan_root(roots, n, "/dev_usb003/roms");
+    n = lib_add_scan_root(roots, n, "/dev_usb003");
     n = lib_add_scan_root(roots, n, "./roms");
     return n;
 }
@@ -6405,16 +6686,11 @@ void ps3_view_ftp(Ps3InputState *input, int *selected_item)
         return;
     }
 
-    if (strcmp(s_ps3_ftp_ip, "127.0.0.1") == 0 || strcmp(s_ps3_ftp_ip, "0.0.0.0") == 0) {
-        if ((s_ftp_modal_frames % 30) == 1) {
-            ps3_ftp_refresh_ip();
-        }
-    }
-
     char ip[32];
     char endpoint[96];
     ps3_ftp_get_ip(ip, sizeof(ip));
     snprintf(endpoint, sizeof(endpoint), "ftp://%s:%d", ip, ps3_ftp_get_port());
+    bool has_valid_ip = (strcmp(ip, "127.0.0.1") != 0 && strcmp(ip, "0.0.0.0") != 0 && strlen(ip) > 0);
 
     if (s_ftp_modal_frames > 10 && (input->pressed & (PS3_BTN_CIRCLE | PS3_BTN_PLUS))) {
         ps3_ftp_stop();
@@ -6426,18 +6702,40 @@ void ps3_view_ftp(Ps3InputState *input, int *selected_item)
         return;
     }
 
+    if (s_ftp_modal_frames > 10 && (input->pressed & PS3_BTN_CROSS) && !has_valid_ip) {
+        char manual[40];
+        snprintf(manual, sizeof(manual), "%s", s_ps3_ftp_manual_ip);
+        ps3_kbd_get((char*)"Enter console IP (XMB network status):", manual, sizeof(manual) - 1, 0, manual);
+        if (manual[0] != '\0') {
+            snprintf(s_ps3_ftp_manual_ip, sizeof(s_ps3_ftp_manual_ip), "%s", manual);
+            write_log("[PS3] ftp: manual IP %s\n", s_ps3_ftp_manual_ip);
+        }
+        input->pressed = 0;
+        input->held = 0;
+        SDL_Delay(80);
+        return;
+    }
+
     int client_count = ps3_ftp_get_client_count();
 
     ps3_draw_card_custom(100.0f, 105.0f, 760.0f, 290.0f, PS3_COLOR_CARD, PS3_COLOR_FOCUS_BORDER);
     ps3_draw_text_centered(480.0f, 130.0f, PS3_COLOR_TEXT_WHITE, 1.25f, "FTP FILE TRANSFER");
 
-    bool has_valid_ip = (strcmp(ip, "127.0.0.1") != 0 && strcmp(ip, "0.0.0.0") != 0 && strlen(ip) > 0);
-    if (!has_valid_ip) {
-        ps3_draw_text_centered(480.0f, 175.0f, PS3_COLOR_AMIGA_ORANGE, 1.10f, "WAITING FOR WI-FI...");
-        ps3_draw_text_centered(480.0f, 215.0f, PS3_COLOR_TEXT_MUTED, 0.95f, "Connect to Wi-Fi in PS3 System Settings");
-    } else {
+    if (has_valid_ip) {
         ps3_draw_text_centered(480.0f, 175.0f, PS3_COLOR_SUCCESS, 1.10f, "FTP SERVER ACTIVE");
         ps3_draw_text_centered(480.0f, 215.0f, PS3_COLOR_TEXT_WHITE, 1.05f, endpoint);
+    } else if (s_ps3_ftp_manual_ip[0] != '\0') {
+        char mep[128];
+        snprintf(mep, sizeof(mep), "ftp://%s:%d  (manual)", s_ps3_ftp_manual_ip, ps3_ftp_get_port());
+        ps3_draw_text_centered(480.0f, 175.0f, PS3_COLOR_SUCCESS, 1.10f, "FTP SERVER ACTIVE");
+        ps3_draw_text_centered(480.0f, 215.0f, PS3_COLOR_TEXT_WHITE, 1.05f, mep);
+    } else if (s_ftp_route_seen) {
+        ps3_draw_text_centered(480.0f, 175.0f, PS3_COLOR_SUCCESS, 1.10f, "CONNECTED");
+        ps3_draw_text_centered(480.0f, 215.0f, PS3_COLOR_TEXT_MUTED, 0.95f,
+                               "IP unavailable - use PS3 XMB network status");
+    } else {
+        ps3_draw_text_centered(480.0f, 175.0f, PS3_COLOR_AMIGA_ORANGE, 1.10f, "WAITING FOR WI-FI...");
+        ps3_draw_text_centered(480.0f, 215.0f, PS3_COLOR_TEXT_MUTED, 0.95f, "Connect to Wi-Fi in PS3 System Settings");
     }
 
     if (client_count > 0) {
@@ -6445,11 +6743,17 @@ void ps3_view_ftp(Ps3InputState *input, int *selected_item)
         snprintf(cbuf, sizeof(cbuf), "Connected Clients: %d", client_count);
         ps3_draw_text_centered(480.0f, 255.0f, PS3_COLOR_SUCCESS, 0.85f, cbuf);
     } else {
-        ps3_draw_text_centered(480.0f, 255.0f, PS3_COLOR_TEXT_MUTED, 0.85f, "Port: 21  (Anonymous or any user/pass)");
+        char pbuf[96];
+        snprintf(pbuf, sizeof(pbuf), "Port: %d  (Anonymous or any user/pass)", ps3_ftp_get_port());
+        ps3_draw_text_centered(480.0f, 255.0f, PS3_COLOR_TEXT_MUTED, 0.85f, pbuf);
     }
 
     ps3_draw_text_centered(480.0f, 290.0f, PS3_COLOR_TEXT_MUTED, 0.80f, "FileZilla / WinSCP / Cyberduck supported");
-    ps3_draw_text_centered(480.0f, 325.0f, PS3_COLOR_TEXT_MUTED, 0.85f, "Press O to stop FTP server and return to System");
+    if (has_valid_ip) {
+        ps3_draw_text_centered(480.0f, 325.0f, PS3_COLOR_TEXT_MUTED, 0.85f, "Press O to stop FTP server and return to System");
+    } else {
+        ps3_draw_text_centered(480.0f, 325.0f, PS3_COLOR_TEXT_MUTED, 0.85f, "X: enter IP manually   O: stop FTP");
+    }
     ps3_draw_footer("FTP ACTIVE", "O STOP & RETURN");
 }
 
